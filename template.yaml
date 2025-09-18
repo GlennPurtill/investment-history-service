@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  investment-history-service
+
+  Sample SAM Template for investment-history-service
+  
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+
+Parameters:
+  StageName:
+    Type: String
+    Default: test
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: "Deployment stage name"
+  DeploymentToken:
+    Type: String
+    Default: ''
+    Description: "Change this token to force a new API deployment (e.g. CI sets to timestamp)"
+
+Resources:
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: hello-world/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          API_KEY: "{{resolve:secretsmanager:investment/api-key:SecretString}}"
+
+  InvestmentHistoryHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: investment-history-api
+      ProtocolType: HTTP
+
+  InvestmentHistoryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InvestmentHistoryHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt HelloWorldFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  InvestmentHistoryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InvestmentHistoryHttpApi
+      RouteKey: "POST /accountHistoryLog"
+      Target: !Sub "integrations/${InvestmentHistoryIntegration}"
+
+  PermissionForApiToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt HelloWorldFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InvestmentHistoryHttpApi}/*/POST/accountHistoryLog"
+
+  InvestmentHistoryStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref InvestmentHistoryHttpApi
+      StageName: !Sub ${StageName}
+      AutoDeploy: false
+      DeploymentId: !Ref InvestmentHistoryDeployment
+
+  InvestmentHistoryDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - InvestmentHistoryIntegration
+      - InvestmentHistoryRoute
+    Properties:
+      ApiId: !Ref InvestmentHistoryHttpApi
+      Description: !Sub "Deployment token: ${DeploymentToken} (stack ${AWS::StackName})"
+
+# Outputs:
+#   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+#   # Find out more about other implicit resources you can reference within SAM
+#   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+#   HelloWorldApi:
+#     Description: "API Gateway endpoint URL for Prod stage for Account History Log"
+#     Value: !Sub "https://${InvestmentHistoryApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/accountHistoryLog/"
+#   HelloWorldFunction:
+#     Description: "Hello World Lambda Function ARN"
+#     Value: !GetAtt HelloWorldFunction.Arn
+#   HelloWorldFunctionIamRole:
+#     Description: "Implicit IAM Role created for Hello World function"
+#     Value: !GetAtt HelloWorldFunctionRole.Arn
