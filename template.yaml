@@ -4,11 +4,6 @@ Description: >
   investment-history-service
 
   Sample SAM Template for investment-history-service
-  
-# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
-Globals:
-  Function:
-    Timeout: 3
 
 Parameters:
   StageName:
@@ -24,75 +19,254 @@ Parameters:
     Default: ''
     Description: "Change this token to force a new API deployment (e.g. CI sets to timestamp)"
 
+  EnableApiAccessLogging:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: "Set to 'true' to enable API Gateway stage access logging (creates an IAM role and CloudWatch LogGroup)."
+
+Conditions:
+  CreateApiAccessLogs: !Equals [ !Ref EnableApiAccessLogging, 'true' ]
+  IsProd: !Equals [ !Ref StageName, 'prod' ]
+
 Resources:
-  HelloWorldFunction:
+
+  #########################################################################
+  # Lambda Function resources
+  # Purpose: the main compute that receives POST /accountHistoryLog requests
+  # from API Gateway and writes/updates records in DynamoDB. We use SAM's
+  # AutoPublishAlias to publish versions and maintain a stable 'live' alias
+  # that API Gateway integrates with.
+  #########################################################################
+
+  InvestmentHistoryFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: hello-world/
-      Handler: app.lambdaHandler
+      FunctionName: !Sub "investment-history-function-${StageName}"
+      CodeUri: src/
+      Handler: index.lambdaHandler
       Runtime: nodejs22.x
       Architectures:
         - x86_64
+      # Timeout: slightly larger in prod to allow longer-running operations
+      Timeout: !If [ IsProd, 6, 3 ]
       Environment:
         Variables:
-          API_KEY: "{{resolve:secretsmanager:investment/api-key:SecretString}}"
+          TABLE_NAME: !Ref InvestmentHistoryTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref InvestmentHistoryTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref InvestmentApiKeySecret
+      AutoPublishAlias: live
 
-  InvestmentHistoryHttpApi:
-    Type: AWS::ApiGatewayV2::Api
+  #########################################################################
+  # API Gateway resources
+  # Purpose: expose a REST API with a single resource /accountHistoryLog and
+  # enforce API key usage via a UsagePlan. Integration is a Lambda proxy to
+  # the function alias 'live' so the function receives the proxy event.
+  #########################################################################
+  
+  InvestmentHistoryRestApi:
+    Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: investment-history-api
-      ProtocolType: HTTP
+      # Include StageName in the RestApi name so multiple stages (test/prod)
+      # can coexist in the same account without name collisions.
+      Name: !Sub "investment-history-api-${StageName}"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
 
-  InvestmentHistoryIntegration:
-    Type: AWS::ApiGatewayV2::Integration
+  InvestmentHistoryResource:
+    Type: AWS::ApiGateway::Resource
     Properties:
-      ApiId: !Ref InvestmentHistoryHttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt HelloWorldFunction.Arn
-      PayloadFormatVersion: '2.0'
+      RestApiId: !Ref InvestmentHistoryRestApi
+      ParentId: !GetAtt [InvestmentHistoryRestApi, RootResourceId]
+      PathPart: accountHistoryLog
 
-  InvestmentHistoryRoute:
-    Type: AWS::ApiGatewayV2::Route
+  InvestmentHistoryMethod:
+    Type: AWS::ApiGateway::Method
     Properties:
-      ApiId: !Ref InvestmentHistoryHttpApi
-      RouteKey: "POST /accountHistoryLog"
-      Target: !Sub "integrations/${InvestmentHistoryIntegration}"
+      RestApiId: !Ref InvestmentHistoryRestApi
+      ResourceId: !Ref InvestmentHistoryResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaAliasArn}/invocations
+            - LambdaAliasArn: !Ref InvestmentHistoryFunction.Alias
+
+  InvestmentHistoryDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - InvestmentHistoryMethod
+    Properties:
+      RestApiId: !Ref InvestmentHistoryRestApi
+      Description: !Sub "Deployment token: ${DeploymentToken} (stack ${AWS::StackName})"
+
+  # Alias and versions are managed automatically by SAM via AutoPublishAlias
+
+  InvestmentHistoryStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - InvestmentHistoryDeployment
+    Properties:
+      StageName: !Ref StageName
+      RestApiId: !Ref InvestmentHistoryRestApi
+      DeploymentId: !Ref InvestmentHistoryDeployment
+      AccessLogSetting: !If
+        - CreateApiAccessLogs
+        - DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+          Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","responseLength":"$context.responseLength"}'
+        - !Ref 'AWS::NoValue'
+      MethodSettings:
+        - DataTraceEnabled: true
+          HttpMethod: POST
+          ResourcePath: /accountHistoryLog
+          MetricsEnabled: false
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - InvestmentHistoryStage
+    Properties:
+      # ApiKey: a CloudFormation-managed API Key. Name includes
+      # DeploymentToken so CI can force recreation when needed.
+      # API Gateway stores the key value; we don't manage the secret here.
+      # Include DeploymentToken so CI can force a new key by changing the token
+      Name: !Sub "investment-history-api-key-${StageName}-${DeploymentToken}"
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref InvestmentHistoryRestApi
+          StageName: !Ref StageName
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - InvestmentHistoryStage
+    Properties:
+      # UsagePlan: binds API stages and quota limits to API keys.
+      # Quota enforces per-key daily limits.
+      UsagePlanName: !Sub "investment-history-usageplan-${StageName}"
+      Description: "Per-key daily quota for investment-history API"
+      Quota:
+        # Use a larger quota in prod
+        Limit: !If [ IsProd, 1000, 100 ]
+        Period: DAY
+      ApiStages:
+        - ApiId: !Ref InvestmentHistoryRestApi
+          Stage: !Ref StageName
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    DependsOn:
+      - ApiKey
+      - UsagePlan
+    Properties:
+      # UsagePlanKey: associate the generated ApiKey with the UsagePlan
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
 
   PermissionForApiToInvokeLambda:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !GetAtt HelloWorldFunction.Arn
+      # Permission: allow API Gateway to invoke the Lambda function alias.
+      # We grant permission specifically to the 'live' alias and restrict
+      # the SourceArn to the API/Stage/Method path.
+      # Grant permission on the published alias (live) so API Gateway can invoke the exact ARN used in integration
+      FunctionName: !Ref InvestmentHistoryFunction.Alias
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InvestmentHistoryHttpApi}/*/POST/accountHistoryLog"
+      SourceArn:
+        Fn::Sub:
+          - arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApiId}/${Stage}/POST/accountHistoryLog
+          - RestApiId: !Ref InvestmentHistoryRestApi
+            Stage: !Ref StageName
 
-  InvestmentHistoryStage:
-    Type: AWS::ApiGatewayV2::Stage
+  InvestmentApiKeySecret:
+    Type: AWS::SecretsManager::Secret
     Properties:
-      ApiId: !Ref InvestmentHistoryHttpApi
-      StageName: !Sub ${StageName}
-      AutoDeploy: false
-      DeploymentId: !Ref InvestmentHistoryDeployment
+      # InvestmentApiKeySecret: legacy secret resource. We generate a
+      # secret string here but the template currently does not wire it
+      # directly into ApiKey anymore. Keep or remove depending on needs.
+      Name: !Sub "investment-api-key-secret-${StageName}"
+      Description: "Auto-generated API key for investment-history API"
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: apiKey
+        PasswordLength: 40
+        ExcludePunctuation: true
 
-  InvestmentHistoryDeployment:
-    Type: AWS::ApiGatewayV2::Deployment
+  #########################################################################
+  # DynamoDB and Logging resources
+  #########################################################################
+  
+  InvestmentHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      # DynamoDB table: stores investment records keyed by timestamp.
+      # PAY_PER_REQUEST keeps operational overhead minimal.
+      TableName: !Sub investment-history-${StageName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: timestamp
+          KeyType: HASH
+
+  InvestmentHistoryLogGroup:
+    Type: AWS::Logs::LogGroup
     DependsOn:
-      - InvestmentHistoryIntegration
-      - InvestmentHistoryRoute
+      - InvestmentHistoryFunction
     Properties:
-      ApiId: !Ref InvestmentHistoryHttpApi
-      Description: !Sub "Deployment token: ${DeploymentToken} (stack ${AWS::StackName})"
+      # Lambda LogGroup: retains function logs for 30 days to aid debugging.
+      LogGroupName: !Sub "/aws/lambda/investment-history-function-${StageName}"
+      RetentionInDays: !If [ IsProd, 365, 30 ]
 
-# Outputs:
-#   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
-#   # Find out more about other implicit resources you can reference within SAM
-#   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-#   HelloWorldApi:
-#     Description: "API Gateway endpoint URL for Prod stage for Account History Log"
-#     Value: !Sub "https://${InvestmentHistoryApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/accountHistoryLog/"
-#   HelloWorldFunction:
-#     Description: "Hello World Lambda Function ARN"
-#     Value: !GetAtt HelloWorldFunction.Arn
-#   HelloWorldFunctionIamRole:
-#     Description: "Implicit IAM Role created for Hello World function"
-#     Value: !GetAtt HelloWorldFunctionRole.Arn
+  ApiGatewayAccessLogGroup:
+    Condition: CreateApiAccessLogs
+    Type: AWS::Logs::LogGroup
+    Properties:
+      # Access Log Group: stores API Gateway access logs when enabled.
+      LogGroupName: !Sub "/aws/apigateway/investment-history-api-${StageName}"
+      RetentionInDays: 30
+
+  ApiGatewayCloudWatchRole:
+    Condition: CreateApiAccessLogs
+    Type: AWS::IAM::Role
+    Properties:
+      # IAM Role used by API Gateway to write access logs to CloudWatch.
+      # We attach the AmazonAPIGatewayPushToCloudWatchLogs managed policy
+      # which grants the needed permissions.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Condition: CreateApiAccessLogs
+    Type: AWS::ApiGateway::Account
+    Properties:
+      # ApiGateway Account: sets the CloudWatch role ARN used by API Gateway
+      # to send access logs. This is an account-level change; some orgs
+      # restrict it. If your account blocks it, set EnableApiAccessLogging
+      # to 'false' and manage the role/setting outside CloudFormation.
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+

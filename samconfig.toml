@@ -18,7 +18,7 @@ confirm_changeset = true
 resolve_s3 = true
 s3_prefix = "investment-history-service"
 region = "us-west-2"
-parameter_overrides = "StageName=\"test\" DeploymentToken=\"2\""
+parameter_overrides = "StageName=\"prod\" DeploymentToken=\"1\" EnableApiAccessLogging=\"false\""
 image_repositories = []
 
 [default.package.parameters]
@@ -32,3 +32,23 @@ warm_containers = "EAGER"
 
 [default.local_start_lambda.parameters]
 warm_containers = "EAGER"
+
+[test.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+s3_prefix = "investment-history-service-test"
+region = "us-west-2"
+stack_name = "investment-history-service-test"
+parameter_overrides = "StageName=\"test\" DeploymentToken=\"0\" EnableApiAccessLogging=\"false\""
+image_repositories = []
+
+[prod.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+s3_prefix = "investment-history-service-prod"
+region = "us-west-2"
+stack_name = "investment-history-service-prod"
+parameter_overrides = "StageName=\"prod\" DeploymentToken=\"1\" EnableApiAccessLogging=\"false\""
+image_repositories = []

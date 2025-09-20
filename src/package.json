@@ -1,0 +1,21 @@
+{
+  "name": "investment-history-service",
+  "version": "1.0.0",
+  "description": "Serverless investment history API with DynamoDB storage, API key enforcement, and rate limiting",
+  "main": "index.mjs",
+  "repository": "https://github.com/GlennPurtill/investment-history-service",
+  "author": "Glenn Purtill",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  },
+  "scripts": {
+    "test": "mocha tests/unit/"
+  },
+  "devDependencies": {
+    "chai": "^4.3.6",
+    "mocha": "^10.2.0"
+  }
+}
