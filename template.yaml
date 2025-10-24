@@ -13,11 +13,11 @@ Parameters:
       - dev
       - test
       - prod
-    Description: "Deployment stage name"
+    Description: 'Deployment stage name'
   DeploymentToken:
     Type: String
     Default: ''
-    Description: "Change this token to force a new API deployment (e.g. CI sets to timestamp)"
+    Description: 'Change this token to force a new API deployment (e.g. CI sets to timestamp)'
 
   EnableApiAccessLogging:
     Type: String
@@ -28,11 +28,10 @@ Parameters:
     Description: "Set to 'true' to enable API Gateway stage access logging (creates an IAM role and CloudWatch LogGroup)."
 
 Conditions:
-  CreateApiAccessLogs: !Equals [ !Ref EnableApiAccessLogging, 'true' ]
-  IsProd: !Equals [ !Ref StageName, 'prod' ]
+  CreateApiAccessLogs: !Equals [!Ref EnableApiAccessLogging, 'true']
+  IsProd: !Equals [!Ref StageName, 'prod']
 
 Resources:
-
   #########################################################################
   # Lambda Function resources
   # Purpose: the main compute that receives POST /accountHistoryLog requests
@@ -44,25 +43,20 @@ Resources:
   InvestmentHistoryFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub "investment-history-function-${StageName}"
+      FunctionName: !Sub 'investment-history-function-${StageName}'
       CodeUri: src/
       Handler: index.lambdaHandler
       Runtime: nodejs22.x
       Architectures:
         - x86_64
       # Timeout: slightly larger in prod to allow longer-running operations
-      Timeout: !If [ IsProd, 6, 3 ]
+      Timeout: 10
       Environment:
         Variables:
-          TABLE_NAME: !Ref InvestmentHistoryTable
+          TABLE_NAME: !Sub investment-history-${StageName}
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref InvestmentHistoryTable
-        - Statement:
-            - Effect: Allow
-              Action:
-                - secretsmanager:GetSecretValue
-              Resource: !Ref InvestmentApiKeySecret
+            TableName: !Sub investment-history-${StageName}
       AutoPublishAlias: live
 
   #########################################################################
@@ -71,13 +65,13 @@ Resources:
   # enforce API key usage via a UsagePlan. Integration is a Lambda proxy to
   # the function alias 'live' so the function receives the proxy event.
   #########################################################################
-  
+
   InvestmentHistoryRestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
       # Include StageName in the RestApi name so multiple stages (test/prod)
       # can coexist in the same account without name collisions.
-      Name: !Sub "investment-history-api-${StageName}"
+      Name: !Sub 'investment-history-api-${StageName}'
       EndpointConfiguration:
         Types:
           - REGIONAL
@@ -111,7 +105,7 @@ Resources:
       - InvestmentHistoryMethod
     Properties:
       RestApiId: !Ref InvestmentHistoryRestApi
-      Description: !Sub "Deployment token: ${DeploymentToken} (stack ${AWS::StackName})"
+      Description: !Sub 'Deployment token: ${DeploymentToken} (stack ${AWS::StackName})'
 
   # Alias and versions are managed automatically by SAM via AutoPublishAlias
 
@@ -143,7 +137,7 @@ Resources:
       # DeploymentToken so CI can force recreation when needed.
       # API Gateway stores the key value; we don't manage the secret here.
       # Include DeploymentToken so CI can force a new key by changing the token
-      Name: !Sub "investment-history-api-key-${StageName}-${DeploymentToken}"
+      Name: !Sub 'investment-history-api-key-${StageName}-${DeploymentToken}'
       Enabled: true
       StageKeys:
         - RestApiId: !Ref InvestmentHistoryRestApi
@@ -156,11 +150,11 @@ Resources:
     Properties:
       # UsagePlan: binds API stages and quota limits to API keys.
       # Quota enforces per-key daily limits.
-      UsagePlanName: !Sub "investment-history-usageplan-${StageName}"
-      Description: "Per-key daily quota for investment-history API"
+      UsagePlanName: !Sub 'investment-history-usageplan-${StageName}'
+      Description: 'Per-key daily quota for investment-history API'
       Quota:
         # Use a larger quota in prod
-        Limit: !If [ IsProd, 1000, 100 ]
+        Limit: !If [IsProd, 1000, 100]
         Period: DAY
       ApiStages:
         - ApiId: !Ref InvestmentHistoryRestApi
@@ -193,24 +187,10 @@ Resources:
           - RestApiId: !Ref InvestmentHistoryRestApi
             Stage: !Ref StageName
 
-  InvestmentApiKeySecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      # InvestmentApiKeySecret: legacy secret resource. We generate a
-      # secret string here but the template currently does not wire it
-      # directly into ApiKey anymore. Keep or remove depending on needs.
-      Name: !Sub "investment-api-key-secret-${StageName}"
-      Description: "Auto-generated API key for investment-history API"
-      GenerateSecretString:
-        SecretStringTemplate: '{}'
-        GenerateStringKey: apiKey
-        PasswordLength: 40
-        ExcludePunctuation: true
-
   #########################################################################
   # DynamoDB and Logging resources
   #########################################################################
-  
+
   InvestmentHistoryTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -231,15 +211,15 @@ Resources:
       - InvestmentHistoryFunction
     Properties:
       # Lambda LogGroup: retains function logs for 30 days to aid debugging.
-      LogGroupName: !Sub "/aws/lambda/investment-history-function-${StageName}"
-      RetentionInDays: !If [ IsProd, 365, 30 ]
+      LogGroupName: !Sub '/aws/lambda/investment-history-function-${StageName}'
+      RetentionInDays: !If [IsProd, 365, 30]
 
   ApiGatewayAccessLogGroup:
     Condition: CreateApiAccessLogs
     Type: AWS::Logs::LogGroup
     Properties:
       # Access Log Group: stores API Gateway access logs when enabled.
-      LogGroupName: !Sub "/aws/apigateway/investment-history-api-${StageName}"
+      LogGroupName: !Sub '/aws/apigateway/investment-history-api-${StageName}'
       RetentionInDays: 30
 
   ApiGatewayCloudWatchRole:
@@ -269,4 +249,3 @@ Resources:
       # restrict it. If your account blocks it, set EnableApiAccessLogging
       # to 'false' and manage the role/setting outside CloudFormation.
       CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
-

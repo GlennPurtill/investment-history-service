@@ -1,4 +1,10 @@
 {
-  "total_invested": 100,
-  "total_value": 200
+  "httpMethod": "POST",
+  "path": "/accountHistoryLog",
+  "headers": {
+    "Content-Type": "application/json",
+    "x-api-key": "Kx8mP2nQ7vR4wE9tY6uI1oL3sD5fG0hJ"
+  },
+  "body": "{\"total_invested\": 100, \"total_value\": 200}",
+  "isBase64Encoded": false
 }

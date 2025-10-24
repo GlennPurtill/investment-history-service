@@ -42,6 +42,7 @@ region = "us-west-2"
 stack_name = "investment-history-service-test"
 parameter_overrides = "StageName=\"test\" DeploymentToken=\"0\" EnableApiAccessLogging=\"false\""
 image_repositories = []
+profile = "default"
 
 [prod.deploy.parameters]
 capabilities = "CAPABILITY_IAM"
